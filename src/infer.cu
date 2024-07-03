@@ -223,7 +223,7 @@ static __native_nvinfer_logger gLogger;
 
 template <typename _T>
 static void destroy_nvidia_pointer(_T *ptr) {
-  if (ptr) ptr->destroy();
+  if (ptr) delete ptr;
 }
 
 static std::vector<uint8_t> load_file(const string &file) {

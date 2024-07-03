@@ -35,3 +35,9 @@ objs
 *.exe
 *.out
 *.app
+
+
+.vscode/
+build/
+
+workspace/

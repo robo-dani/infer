@@ -41,8 +41,8 @@ yolo::Image cvimg(const cv::Mat &image) {
 }
 
 void single_inference() {
-    cv::Mat image = cv::imread("inference/car.jpg");
-    auto yolo = yolo::load("yolov8n-seg.b1.transd.engine", yolo::Type::V8Seg);
+    cv::Mat image = cv::imread("1720.jpg");
+    auto yolo = yolo::load("best.engine", yolo::Type::V8Seg);
     if (yolo == nullptr) return;
 
     auto objs = yolo->forward(cvimg(image));
@@ -50,23 +50,41 @@ void single_inference() {
     for (auto &obj : objs) {
         uint8_t b, g, r;
         tie(b, g, r) = yolo::random_color(obj.class_label);
-        cv::rectangle(image, cv::Point(obj.left, obj.top),
-                      cv::Point(obj.right, obj.bottom), cv::Scalar(b, g, r), 5);
+        cv::Vec3b color(b,g,r);
 
-        auto name = cocolabels[obj.class_label];
-        auto caption = cv::format("%s %.2f", name, obj.confidence);
-        int width = cv::getTextSize(caption, 0, 1, 2, nullptr).width + 10;
-        cv::rectangle(image, cv::Point(obj.left - 3, obj.top - 33),
-                      cv::Point(obj.left + width, obj.top), cv::Scalar(b, g, r),
-                      -1);
-        cv::putText(image, caption, cv::Point(obj.left, obj.top - 5), 0, 1,
-                    cv::Scalar::all(0), 2, 16);
+        auto obj_width = obj.right - obj.left;
+        auto obj_height = obj.bottom - obj.top;
+
+        // auto name = cocolabels[obj.class_label];
+        // auto caption = cv::format("%s %.2f", name, obj.confidence);
+        // int width = cv::getTextSize(caption, 0, 1, 2, nullptr).width + 10;
+        // cv::rectangle(image, cv::Point(obj.left - 3, obj.top - 33),
+        //               cv::Point(obj.left + width, obj.top), cv::Scalar(b, g, r),
+        //               -1);
+        // cv::putText(image, caption, cv::Point(obj.left, obj.top - 5), 0, 1,
+        //             cv::Scalar::all(0), 2, 16);
 
         if (obj.seg) {
+            cv::Mat mask(obj.seg->height, obj.seg->width, CV_8U, obj.seg->data);
+            cv::Mat resized_mask;
+
+            cv::resize(mask, resized_mask, cv::Size(obj_width, obj_height));
             cv::imwrite(
                 cv::format("%d_mask.jpg", i),
-                cv::Mat(obj.seg->height, obj.seg->width, CV_8U, obj.seg->data));
+                resized_mask);
             i++;
+
+            // for 循环逐个绘制
+            auto x = obj.left;
+            auto y = obj.top;
+
+            for (int i =0; i < resized_mask.rows; i++) {
+                for (int j =0; j < resized_mask.cols; j++) {
+                    if(resized_mask.at<uchar>(i,j) > 128 ) {
+                        image.at<cv::Vec3b>(y+i, x+j) = color;
+                    }
+              }
+            }
         }
     }
 

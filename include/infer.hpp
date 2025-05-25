@@ -71,8 +71,8 @@ class Memory : public BaseMemory {
 
 class Infer {
  public:
-  virtual bool forward(const std::vector<void *> &bindings, void *stream = nullptr,
-                       void *input_consum_event = nullptr) = 0;
+  virtual bool setTensorAddress(char const* name, void* data) = 0;
+  virtual bool forward(void *stream = nullptr) = 0;
   virtual int index(const std::string &name) = 0;
   virtual std::vector<int> run_dims(const std::string &name) = 0;
   virtual std::vector<int> run_dims(int ibinding) = 0;
@@ -81,11 +81,11 @@ class Infer {
   virtual int numel(const std::string &name) = 0;
   virtual int numel(int ibinding) = 0;
   virtual int num_bindings() = 0;
-  virtual bool is_input(int ibinding) = 0;
+  // virtual bool is_input(int ibinding) = 0;
   virtual bool set_run_dims(const std::string &name, const std::vector<int> &dims) = 0;
   virtual bool set_run_dims(int ibinding, const std::vector<int> &dims) = 0;
   virtual DType dtype(const std::string &name) = 0;
-  virtual DType dtype(int ibinding) = 0;
+  // virtual DType dtype(int ibinding) = 0;
   virtual bool has_dynamic_dim() = 0;
   virtual void print() = 0;
 };

@@ -256,7 +256,7 @@ class __native_engine_context {
     runtime_ = shared_ptr<IRuntime>(createInferRuntime(gLogger), destroy_nvidia_pointer<IRuntime>);
     if (runtime_ == nullptr) return false;
 
-    engine_ = shared_ptr<ICudaEngine>(runtime_->deserializeCudaEngine(pdata, size, nullptr),
+    engine_ = shared_ptr<ICudaEngine>(runtime_->deserializeCudaEngine(pdata, size),
                                       destroy_nvidia_pointer<ICudaEngine>);
     if (engine_ == nullptr) return false;
 
@@ -306,11 +306,11 @@ class InferImpl : public Infer {
 
   void setup() {
     auto engine = this->context_->engine_;
-    int nbBindings = engine->getNbBindings();
+    int nbBindings = engine->getNbIOTensors();
 
     binding_name_to_index_.clear();
     for (int i = 0; i < nbBindings; ++i) {
-      const char *bindingName = engine->getBindingName(i);
+      const char *bindingName = engine->getIOTensorName(i);
       binding_name_to_index_[bindingName] = i;
     }
   }
@@ -322,10 +322,13 @@ class InferImpl : public Infer {
     return iter->second;
   }
 
-  virtual bool forward(const std::vector<void *> &bindings, void *stream,
-                       void *input_consum_event) override {
-    return this->context_->context_->enqueueV2((void**)bindings.data(), (cudaStream_t)stream,
-                                               (cudaEvent_t *)input_consum_event);
+  virtual bool setTensorAddress(char const* name, void* data) {
+    return this->context_->context_->setTensorAddress(name, data);
+  }
+
+  virtual bool forward(void *stream) override {
+    
+    return this->context_->context_->enqueueV3((cudaStream_t)stream);
   }
 
   virtual std::vector<int> run_dims(const std::string &name) override {
@@ -333,7 +336,8 @@ class InferImpl : public Infer {
   }
 
   virtual std::vector<int> run_dims(int ibinding) override {
-    auto dim = this->context_->context_->getBindingDimensions(ibinding);
+    auto name = this->context_->engine_->getIOTensorName(ibinding);
+    auto dim = this->context_->context_->getTensorShape(name);
     return std::vector<int>(dim.d, dim.d + dim.nbDims);
   }
 
@@ -342,15 +346,17 @@ class InferImpl : public Infer {
   }
 
   virtual std::vector<int> static_dims(int ibinding) override {
-    auto dim = this->context_->engine_->getBindingDimensions(ibinding);
+    auto name = this->context_->engine_->getIOTensorName(ibinding);
+    auto dim = this->context_->engine_->getTensorShape(name);
     return std::vector<int>(dim.d, dim.d + dim.nbDims);
   }
 
-  virtual int num_bindings() override { return this->context_->engine_->getNbBindings(); }
+  virtual int num_bindings() override { return this->context_->engine_->getNbIOTensors(); }
 
-  virtual bool is_input(int ibinding) override {
-    return this->context_->engine_->bindingIsInput(ibinding);
-  }
+  // virtual bool is_input(int ibinding) override {
+  //   auto mode = engine->getTensorIOMode()
+  //   return this->context_->engine_->bindingIsInput(ibinding);
+  // }
 
   virtual bool set_run_dims(const std::string &name, const std::vector<int> &dims) override {
     return this->set_run_dims(index(name), dims);
@@ -360,28 +366,31 @@ class InferImpl : public Infer {
     Dims d;
     memcpy(d.d, dims.data(), sizeof(int) * dims.size());
     d.nbDims = dims.size();
-    return this->context_->context_->setBindingDimensions(ibinding, d);
+    auto name = this->context_->engine_->getIOTensorName(ibinding);
+    return this->context_->context_->setInputShape(name, d);
   }
 
   virtual int numel(const std::string &name) override { return numel(index(name)); }
 
   virtual int numel(int ibinding) override {
-    auto dim = this->context_->context_->getBindingDimensions(ibinding);
+    auto name = this->context_->engine_->getIOTensorName(ibinding);
+    auto dim = this->context_->context_->getTensorShape(name);
     return std::accumulate(dim.d, dim.d + dim.nbDims, 1, std::multiplies<int>());
   }
 
-  virtual DType dtype(const std::string &name) override { return dtype(index(name)); }
+  virtual DType dtype(const std::string &name) override { return (DType)this->context_->engine_->getTensorDataType(name.c_str()); }
 
-  virtual DType dtype(int ibinding) override {
-    return (DType)this->context_->engine_->getBindingDataType(ibinding);
-  }
+  // virtual DType dtype(int ibinding) override {
+  //   return (DType)this->context_->engine_->getBindingDataType(ibinding);
+  // }
 
   virtual bool has_dynamic_dim() override {
     // check if any input or output bindings have dynamic shapes
     // code from ChatGPT
-    int numBindings = this->context_->engine_->getNbBindings();
+    int numBindings = this->context_->engine_->getNbIOTensors();
     for (int i = 0; i < numBindings; ++i) {
-      nvinfer1::Dims dims = this->context_->engine_->getBindingDimensions(i);
+      auto name = this->context_->engine_->getIOTensorName(i);
+      nvinfer1::Dims dims = this->context_->engine_->getTensorShape(name);
       for (int j = 0; j < dims.nbDims; ++j) {
         if (dims.d[j] == -1) return true;
       }
@@ -395,24 +404,27 @@ class InferImpl : public Infer {
     int num_input = 0;
     int num_output = 0;
     auto engine = this->context_->engine_;
-    for (int i = 0; i < engine->getNbBindings(); ++i) {
-      if (engine->bindingIsInput(i))
+    for (int i = 0; i < engine->getNbIOTensors(); ++i) {
+      auto name = engine->getIOTensorName(i);
+      auto mode = engine->getTensorIOMode(name);
+      if (mode == nvinfer1::TensorIOMode::kINPUT) {
         num_input++;
-      else
+      } else if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
         num_output++;
+      }
     }
 
     INFO("Inputs: %d", num_input);
     for (int i = 0; i < num_input; ++i) {
-      auto name = engine->getBindingName(i);
-      auto dim = engine->getBindingDimensions(i);
+      auto name = engine->getIOTensorName(i);
+      auto dim = engine->getTensorShape(name);
       INFO("\t%d.%s : shape {%s}", i, name, format_shape(dim).c_str());
     }
 
     INFO("Outputs: %d", num_output);
     for (int i = 0; i < num_output; ++i) {
-      auto name = engine->getBindingName(i + num_input);
-      auto dim = engine->getBindingDimensions(i + num_input);
+      auto name = engine->getIOTensorName(i + num_input);
+      auto dim = engine->getTensorShape(name);
       INFO("\t%d.%s : shape {%s}", i, name, format_shape(dim).c_str());
     }
   }

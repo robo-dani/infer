@@ -466,7 +466,6 @@ class InferImpl : public Infer {
     bbox_predict_.gpu(batch_size * bbox_head_dims_[1] * bbox_head_dims_[2]);
     output_boxarray_.gpu(batch_size * (32 + MAX_IMAGE_BOXES * NUM_BOX_ELEMENT));
     output_boxarray_.cpu(batch_size * (32 + MAX_IMAGE_BOXES * NUM_BOX_ELEMENT));
-
     if (has_segment_)
       segment_predict_.gpu(batch_size * segment_head_dims_[1] * segment_head_dims_[2] *
                            segment_head_dims_[3]);
@@ -524,8 +523,9 @@ class InferImpl : public Infer {
     bbox_head_dims_ = trt_->static_dims(1);
     has_segment_ = type == Type::V8Seg;
     if (has_segment_) {
-      bbox_head_dims_ = trt_->static_dims(2);
-      segment_head_dims_ = trt_->static_dims(1);
+      // 为什么这里反了
+      bbox_head_dims_ = trt_->static_dims(1);
+      segment_head_dims_ = trt_->static_dims(2);
     }
     network_input_width_ = input_dim[3];
     network_input_height_ = input_dim[2];
@@ -580,20 +580,20 @@ class InferImpl : public Infer {
       }
     }
     adjust_memory(infer_batch_size);
-
     vector<AffineMatrix> affine_matrixs(num_image);
     cudaStream_t stream_ = (cudaStream_t)stream;
     for (int i = 0; i < num_image; ++i)
       preprocess(i, images[i], preprocess_buffers_[i], affine_matrixs[i], stream);
 
     float *bbox_output_device = bbox_predict_.gpu();
-    vector<void *> bindings{input_buffer_.gpu(), bbox_output_device};
-
+    // vector<void *> bindings{input_buffer_.gpu(), bbox_output_device};
+    trt_->setTensorAddress("images", input_buffer_.gpu());
+    trt_->setTensorAddress("output0", bbox_output_device);
+    
     if (has_segment_) {
-      bindings = {input_buffer_.gpu(), segment_predict_.gpu(), bbox_output_device};
+      trt_->setTensorAddress("output1", segment_predict_.gpu());
     }
-
-    if (!trt_->forward(bindings, stream)) {
+    if (!trt_->forward(stream)) {
       INFO("Failed to tensorRT forward.");
       return {};
     }

@@ -22,6 +22,5 @@ include_directories(
 link_directories(/usr/lib/aarch64-linux-gnu/)
 
 
-
 add_subdirectory(src)
 add_subdirectory(app)

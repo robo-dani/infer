@@ -7,47 +7,28 @@
 
 using namespace std;
 
-static const char *cocolabels[] = {
-    "person",        "bicycle",      "car",
-    "motorcycle",    "airplane",     "bus",
-    "train",         "truck",        "boat",
-    "traffic light", "fire hydrant", "stop sign",
-    "parking meter", "bench",        "bird",
-    "cat",           "dog",          "horse",
-    "sheep",         "cow",          "elephant",
-    "bear",          "zebra",        "giraffe",
-    "backpack",      "umbrella",     "handbag",
-    "tie",           "suitcase",     "frisbee",
-    "skis",          "snowboard",    "sports ball",
-    "kite",          "baseball bat", "baseball glove",
-    "skateboard",    "surfboard",    "tennis racket",
-    "bottle",        "wine glass",   "cup",
-    "fork",          "knife",        "spoon",
-    "bowl",          "banana",       "apple",
-    "sandwich",      "orange",       "broccoli",
-    "carrot",        "hot dog",      "pizza",
-    "donut",         "cake",         "chair",
-    "couch",         "potted plant", "bed",
-    "dining table",  "toilet",       "tv",
-    "laptop",        "mouse",        "remote",
-    "keyboard",      "cell phone",   "microwave",
-    "oven",          "toaster",      "sink",
-    "refrigerator",  "book",         "clock",
-    "vase",          "scissors",     "teddy bear",
-    "hair drier",    "toothbrush"};
+// water_segment class contract (docs/ROADMAP.md) -- ids are fixed downstream
+static const char *classlabels[] = {"water", "bridge", "person", "boat"};
 
 yolo::Image cvimg(const cv::Mat &image) {
     return yolo::Image(image.data, image.cols, image.rows);
 }
 
-void single_inference() {
-    cv::Mat image = cv::imread("1720.jpg");
-    auto yolo = yolo::load("best.engine", yolo::Type::V8Seg);
+void single_inference(const char *engine_path, const char *image_path) {
+    cv::Mat image = cv::imread(image_path);
+    if (image.empty()) {
+        printf("failed to read image: %s\n", image_path);
+        return;
+    }
+    auto yolo = yolo::load(engine_path, yolo::Type::V26Seg, 0.4f);
     if (yolo == nullptr) return;
 
     auto objs = yolo->forward(cvimg(image));
     int i = 0;
     for (auto &obj : objs) {
+        printf("  %-6s conf=%.3f box=(%.0f,%.0f,%.0f,%.0f)\n",
+               classlabels[obj.class_label], obj.confidence, obj.left, obj.top,
+               obj.right, obj.bottom);
         uint8_t b, g, r;
         tie(b, g, r) = yolo::random_color(obj.class_label);
         cv::Vec3b color(b,g,r);
@@ -92,7 +73,9 @@ void single_inference() {
     cv::imwrite("Result.jpg", image);
 }
 
-int main() {
-    single_inference();
+int main(int argc, char **argv) {
+    const char *engine_path = argc > 1 ? argv[1] : "best.engine";
+    const char *image_path = argc > 2 ? argv[2] : "1720.jpg";
+    single_inference(engine_path, image_path);
     return 0;
 }

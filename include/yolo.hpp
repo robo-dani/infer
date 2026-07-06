@@ -14,7 +14,8 @@ enum class Type : int {
   V3 = 2,
   V7 = 3,
   V8 = 5,
-  V8Seg = 6  // yolov8 instance segmentation
+  V8Seg = 6,  // yolov8 instance segmentation
+  V26Seg = 7  // yolo26 end-to-end instance segmentation (NMS-free head)
 };
 
 struct InstanceSegmentMap {

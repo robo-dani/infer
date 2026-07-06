@@ -170,6 +170,41 @@ static __global__ void decode_kernel_v8(float *predict, int num_bboxes, int num_
   *pout_item++ = position;
 }
 
+// YOLO26 end-to-end head: each row is already a final detection
+// [x1, y1, x2, y2, confidence, class, mask coefficients...] -- the model
+// de-duplicates internally, so rows only need thresholding, no NMS pass.
+static __global__ void decode_kernel_v26seg(float *predict, int num_bboxes, int output_cdim,
+                                            float confidence_threshold,
+                                            float *invert_affine_matrix, float *parray,
+                                            int MAX_IMAGE_BOXES) {
+  int position = blockDim.x * blockIdx.x + threadIdx.x;
+  if (position >= num_bboxes) return;
+
+  float *pitem = predict + output_cdim * position;
+  float confidence = pitem[4];
+  if (confidence < confidence_threshold) return;
+
+  int index = atomicAdd(parray, 1);
+  if (index >= MAX_IMAGE_BOXES) return;
+
+  float left = pitem[0];
+  float top = pitem[1];
+  float right = pitem[2];
+  float bottom = pitem[3];
+  affine_project(invert_affine_matrix, left, top, &left, &top);
+  affine_project(invert_affine_matrix, right, bottom, &right, &bottom);
+
+  float *pout_item = parray + 1 + index * NUM_BOX_ELEMENT;
+  *pout_item++ = left;
+  *pout_item++ = top;
+  *pout_item++ = right;
+  *pout_item++ = bottom;
+  *pout_item++ = confidence;
+  *pout_item++ = pitem[5];  // class label, provided directly by the head
+  *pout_item++ = 1;         // 1 = keep, 0 = ignore
+  *pout_item++ = position;  // row index (for mask coefficients)
+}
+
 static __device__ float box_iou(float aleft, float atop, float aright, float abottom, float bleft,
                                 float btop, float bright, float bbottom) {
   float cleft = max(aleft, bleft);
@@ -226,7 +261,12 @@ static void decode_kernel_invoker(float *predict, int num_bboxes, int num_classe
   auto grid = grid_dims(num_bboxes);
   auto block = block_dims(num_bboxes);
 
-  if (type == Type::V8 || type == Type::V8Seg) {
+  if (type == Type::V26Seg) {
+    checkKernel(decode_kernel_v26seg<<<grid, block, 0, stream>>>(
+        predict, num_bboxes, output_cdim, confidence_threshold, invert_affine_matrix, parray,
+        MAX_IMAGE_BOXES));
+    return;  // end-to-end head: model already de-duplicated, skip NMS
+  } else if (type == Type::V8 || type == Type::V8Seg) {
     checkKernel(decode_kernel_v8<<<grid, block, 0, stream>>>(
         predict, num_bboxes, num_classes, output_cdim, confidence_threshold, invert_affine_matrix,
         parray, MAX_IMAGE_BOXES));
@@ -388,6 +428,10 @@ const char *type_name(Type type) {
       return "YoloX";
     case Type::V8:
       return "YoloV8";
+    case Type::V8Seg:
+      return "YoloV8Seg";
+    case Type::V26Seg:
+      return "Yolo26Seg";
     default:
       return "Unknow";
   }
@@ -453,6 +497,7 @@ class InferImpl : public Infer {
   vector<int> bbox_head_dims_;
   vector<int> segment_head_dims_;
   int num_classes_ = 0;
+  int mask_coef_offset_ = 0;  // offset of mask coefficients within a bbox row
   bool has_segment_ = false;
   bool isdynamic_model_ = false;
   vector<shared_ptr<trt::Memory<unsigned char>>> box_segment_cache_;
@@ -521,7 +566,7 @@ class InferImpl : public Infer {
 
     auto input_dim = trt_->static_dims(0);
     bbox_head_dims_ = trt_->static_dims(1);
-    has_segment_ = type == Type::V8Seg;
+    has_segment_ = type == Type::V8Seg || type == Type::V26Seg;
     if (has_segment_) {
       // 为什么这里反了
       bbox_head_dims_ = trt_->static_dims(1);
@@ -540,6 +585,14 @@ class InferImpl : public Infer {
     } else if (type == Type::V8Seg) {
       normalize_ = Norm::alpha_beta(1 / 255.0f, 0.0f, ChannelType::SwapRB);
       num_classes_ = bbox_head_dims_[2] - 4 - segment_head_dims_[1];
+      mask_coef_offset_ = 4 + num_classes_;
+    } else if (type == Type::V26Seg) {
+      normalize_ = Norm::alpha_beta(1 / 255.0f, 0.0f, ChannelType::SwapRB);
+      // end-to-end rows: [x1, y1, x2, y2, conf, cls, mask coefficients...];
+      // class ids come straight from the row, num_classes_ is not involved
+      // in decoding
+      num_classes_ = 0;
+      mask_coef_offset_ = 6;
     } else if (type == Type::X) {
       // float mean[] = {0.485, 0.456, 0.406};
       // float std[]  = {0.229, 0.224, 0.225};
@@ -631,7 +684,7 @@ class InferImpl : public Infer {
             int mask_dim = segment_head_dims_[1];
             float *mask_weights = bbox_output_device +
                                   (ib * bbox_head_dims_[1] + row_index) * bbox_head_dims_[2] +
-                                  num_classes_ + 4;
+                                  mask_coef_offset_;
 
             float *mask_head_predict = segment_predict_.gpu();
             float left, top, right, bottom;

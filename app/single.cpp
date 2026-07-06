@@ -1,4 +1,7 @@
 
+#include <algorithm>
+#include <cmath>
+
 #include <opencv2/opencv.hpp>
 
 #include "cpm.hpp"
@@ -33,8 +36,8 @@ void single_inference(const char *engine_path, const char *image_path) {
         tie(b, g, r) = yolo::random_color(obj.class_label);
         cv::Vec3b color(b,g,r);
 
-        auto obj_width = obj.right - obj.left;
-        auto obj_height = obj.bottom - obj.top;
+        int obj_width = std::max(1, (int)std::round(obj.right - obj.left));
+        int obj_height = std::max(1, (int)std::round(obj.bottom - obj.top));
 
         // auto name = cocolabels[obj.class_label];
         // auto caption = cv::format("%s %.2f", name, obj.confidence);
@@ -55,16 +58,21 @@ void single_inference(const char *engine_path, const char *image_path) {
                 resized_mask);
             i++;
 
-            // for 循环逐个绘制
-            auto x = obj.left;
-            auto y = obj.top;
+            // paint mask pixels; boxes from the end-to-end head may stick a
+            // few px out of the image, so clamp every write into bounds
+            int x = (int)std::round(obj.left);
+            int y = (int)std::round(obj.top);
 
-            for (int i =0; i < resized_mask.rows; i++) {
-                for (int j =0; j < resized_mask.cols; j++) {
-                    if(resized_mask.at<uchar>(i,j) > 128 ) {
-                        image.at<cv::Vec3b>(y+i, x+j) = color;
+            for (int r = 0; r < resized_mask.rows; r++) {
+                int py = y + r;
+                if (py < 0 || py >= image.rows) continue;
+                for (int c = 0; c < resized_mask.cols; c++) {
+                    int px = x + c;
+                    if (px < 0 || px >= image.cols) continue;
+                    if (resized_mask.at<uchar>(r, c) > 128) {
+                        image.at<cv::Vec3b>(py, px) = color;
                     }
-              }
+                }
             }
         }
     }

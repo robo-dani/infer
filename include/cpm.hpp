@@ -32,16 +32,18 @@ class Instance {
   virtual ~Instance() { stop(); }
 
   void stop() {
-    run_ = false;
-    cond_.notify_one();
     {
+      // run_ changes under the lock, else the worker can miss the wakeup between checking its
+      // wait predicate and blocking
       std::unique_lock<std::mutex> l(queue_lock_);
+      run_ = false;
       while (!input_queue_.empty()) {
         auto &item = input_queue_.front();
         if (item.pro) item.pro->set_value(Result());
         input_queue_.pop();
       }
-    };
+    }
+    cond_.notify_all();
 
     if (worker_) {
       worker_->join();

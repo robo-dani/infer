@@ -3,7 +3,8 @@
 //   bench_v26seg <engine> <calibration.yaml> <raw frame> [iterations]
 //
 // U is the raw frame undistorted on the CPU with cv::remap (CV_16SC2 maps), the way a caller does
-// without set_source_map. Pinned means the frame sits in cudaMallocHost memory.
+// without set_source_map. Pinned means the frame sits in cudaMallocHost memory. BGRx is the raw
+// frame with a 4th byte per pixel, as a camera pipeline without a BGRx-to-BGR conversion gives.
 #include <cuda_runtime.h>
 
 #include <chrono>
@@ -51,6 +52,8 @@ int main(int argc, char **argv) {
   cv::initUndistortRectifyMap(K, D, cv::noArray(), K, raw.size(), CV_16SC2, map1, map2);
   cv::convertMaps(map1, map2, map_xy, cv::noArray(), CV_32FC2);
   cv::remap(raw, undist, map1, map2, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+  cv::Mat raw_bgrx;
+  cv::cvtColor(raw, raw_bgrx, cv::COLOR_BGR2BGRA);
 
   size_t bytes = raw.total() * 3;
   uint8_t *raw_pinned, *undist_pinned;
@@ -63,8 +66,8 @@ int main(int argc, char **argv) {
   auto model = yolo::load(argv[1], yolo::Type::V26Seg, 0.4f);
   if (!model) return 1;
   yolo::Detections out;
-  auto forward = [&](const void *frame) {
-    if (!model->forward(yolo::Image(frame, w, h), out)) exit(1);
+  auto forward = [&](const void *frame, int channels = 3) {
+    if (!model->forward(yolo::Image(frame, w, h, channels), out)) exit(1);
   };
 
   printf("frame %dx%d, %d iterations\n\n", w, h, n);
@@ -86,6 +89,8 @@ int main(int argc, char **argv) {
          average_ms(n, [&] { forward(raw.data); }));
   printf("forward raw pinned + source map          %7.3f ms\n",
          average_ms(n, [&] { forward(raw_pinned); }));
+  printf("forward raw BGRx pageable + source map   %7.3f ms\n",
+         average_ms(n, [&] { forward(raw_bgrx.data, 4); }));
   model->set_source_map(0, 0, nullptr);
 
   // TensorRT alone, on a context of its own (forward replays a CUDA graph)
@@ -110,7 +115,7 @@ int main(int argc, char **argv) {
   int net_w = trt->static_dims("images")[3], net_h = trt->static_dims("images")[2];
   uint8_t *frame_device;
   float *map_device;
-  CHECK_CUDA(cudaMalloc(&frame_device, bytes));
+  CHECK_CUDA(cudaMalloc(&frame_device, raw_bgrx.total() * 4));
   CHECK_CUDA(cudaMalloc(&map_device, map_xy.total() * 2 * sizeof(float)));
   CHECK_CUDA(cudaMemcpy(map_device, map_xy.ptr<float>(), map_xy.total() * 2 * sizeof(float),
                         cudaMemcpyHostToDevice));
@@ -118,9 +123,9 @@ int main(int argc, char **argv) {
   affine.compute(w, h, net_w, net_h);
   auto norm = yolo::Norm::alpha_beta(1 / 255.0f, 0.0f, yolo::ChannelType::SwapRB);
   yolo::SourceMap no_map, with_map{(const float2 *)map_device, w, h};
-  auto letterbox = [&](const uint8_t *src, const yolo::SourceMap &map) {
-    yolo::warp_affine_bilinear_and_normalize_plane(src, w * 3, w, h, map, tensor, net_w, net_h,
-                                                   affine.d2i, 114, norm, stream);
+  auto letterbox = [&](const uint8_t *src, const yolo::SourceMap &map, int channels = 3) {
+    yolo::warp_affine_bilinear_and_normalize_plane(src, w * channels, channels, w, h, map, tensor,
+                                                   net_w, net_h, affine.d2i, 114, norm, stream);
   };
   printf("preprocess only (letterbox to %dx%d):\n", net_w, net_h);
   printf("  H2D pageable + letterbox               %7.3f ms\n", average_ms(n, [&] {
@@ -145,6 +150,11 @@ int main(int argc, char **argv) {
          }));
   printf("  remap letterbox from device            %7.3f ms\n", average_ms(n, [&] {
            letterbox(frame_device, with_map);
+           CHECK_CUDA(cudaStreamSynchronize(stream));
+         }));
+  CHECK_CUDA(cudaMemcpy(frame_device, raw_bgrx.data, raw_bgrx.total() * 4, cudaMemcpyHostToDevice));
+  printf("  remap letterbox from device, BGRx      %7.3f ms\n", average_ms(n, [&] {
+           letterbox(frame_device, with_map, 4);
            CHECK_CUDA(cudaStreamSynchronize(stream));
          }));
   return 0;

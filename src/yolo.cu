@@ -319,7 +319,7 @@ class InferImpl : public Infer {
 
     // A frame in page-locked, mapped or device memory is read in place, anything else is copied
     // over. Checking both ends keeps a frame that overruns its allocation off the in-place path.
-    size_t size_image = (size_t)image.width * image.height * 3;
+    size_t size_image = (size_t)image.width * image.height * image.channels;
     const uint8_t *image_device = nullptr;
     cudaPointerAttributes first, last;
     if (cudaPointerGetAttributes(&first, image.bgrptr) == cudaSuccess &&
@@ -339,10 +339,10 @@ class InferImpl : public Infer {
 
     size_t input_numel = network_input_width_ * network_input_height_ * 3;
     float *input_device = input_buffer_.gpu() + ibatch * input_numel;
-    warp_affine_bilinear_and_normalize_plane(image_device, image.width * 3, image.width,
-                                             image.height, source_map, input_device,
-                                             network_input_width_, network_input_height_,
-                                             affine.d2i, 114, normalize_, stream);
+    warp_affine_bilinear_and_normalize_plane(
+        image_device, image.width * image.channels, image.channels, image.width, image.height,
+        source_map, input_device, network_input_width_, network_input_height_, affine.d2i, 114,
+        normalize_, stream);
   }
 
   bool load(const string &engine_file, Type type, float confidence_threshold, float nms_threshold) {
@@ -449,9 +449,10 @@ class InferImpl : public Infer {
 
   bool infer(const Image *images, int num_image, Detections *outs, void *stream) {
     for (int i = 0; i < num_image; ++i) {
-      if (images[i].bgrptr == nullptr || images[i].width <= 0 || images[i].height <= 0) {
-        INFO("Invalid image %d: %p %dx%d", i, images[i].bgrptr, images[i].width,
-             images[i].height);
+      if (images[i].bgrptr == nullptr || images[i].width <= 0 || images[i].height <= 0 ||
+          (images[i].channels != 3 && images[i].channels != 4)) {
+        INFO("Invalid image %d: %p %dx%d, %d channels", i, images[i].bgrptr, images[i].width,
+             images[i].height, images[i].channels);
         return false;
       }
     }

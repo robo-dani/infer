@@ -11,6 +11,9 @@
 //           same input tensor, plus the water mask of the previous library (7ec96f5 and the
 //           caller's resize-and-paste post-processing), emulated
 //   e2e     forward(U) vs forward(raw) with set_source_map, from pageable and page-locked memory
+//   bgrx    the same frames as BGRx (garbage in the x byte) vs BGR: tensors with and without a
+//           source map, forward plain / through the map from pageable and page-locked memory /
+//           forwards; everything must match bit for bit
 // With --labels the frames are taken as labelled, without undistortion: ref runs on the raw frame
 // and water IoU against the label polygons is reported for the old and the new mask.
 #include <cuda_runtime.h>
@@ -48,10 +51,10 @@ static const float kConfidence = 0.4f;
 static const int kGridW = 960, kGridH = 540;
 static const int kWater = 0;
 
-// the library's letterbox kernel, run on a host frame
+// the library's letterbox kernel, run on a host frame (BGR or BGRx)
 static vector<float> letterbox(const cv::Mat &src, const float *map_device, int map_w, int map_h,
                                int net_w, int net_h) {
-  size_t bytes = src.total() * 3;
+  size_t bytes = src.total() * src.elemSize();
   uint8_t *src_device;
   float *dst_device;
   CHECK_CUDA(cudaMalloc(&src_device, bytes));
@@ -62,9 +65,9 @@ static vector<float> letterbox(const cv::Mat &src, const float *map_device, int 
   yolo::AffineMatrix affine;
   affine.compute(map_device ? map_w : src.cols, map_device ? map_h : src.rows, net_w, net_h);
   yolo::warp_affine_bilinear_and_normalize_plane(
-      src_device, src.cols * 3, src.cols, src.rows, source_map, dst_device, net_w, net_h,
-      affine.d2i, 114, yolo::Norm::alpha_beta(1 / 255.0f, 0.0f, yolo::ChannelType::SwapRB),
-      nullptr);
+      src_device, (int)src.step, (int)src.elemSize(), src.cols, src.rows, source_map, dst_device,
+      net_w, net_h, affine.d2i, 114,
+      yolo::Norm::alpha_beta(1 / 255.0f, 0.0f, yolo::ChannelType::SwapRB), nullptr);
   CHECK_CUDA(cudaDeviceSynchronize());
   vector<float> out(net_w * net_h * 3);
   CHECK_CUDA(
@@ -289,6 +292,31 @@ static double box_diff(const yolo::BoxArray &a, const yolo::BoxArray &b, int *un
   return box_diff(a, as_ref, unmatched);
 }
 
+// boxes that differ in any field or instance-map byte, compared in order: for outputs that must be
+// identical
+static int box_mismatches(const yolo::BoxArray &a, const yolo::BoxArray &b) {
+  int n = std::abs((int)a.size() - (int)b.size());
+  for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+    const yolo::Box &x = a[i], &y = b[i];
+    bool same = x.left == y.left && x.top == y.top && x.right == y.right && x.bottom == y.bottom &&
+                x.confidence == y.confidence && x.class_label == y.class_label && !x.seg == !y.seg;
+    if (same && x.seg)
+      same = x.seg->width == y.seg->width && x.seg->height == y.seg->height &&
+             memcmp(x.seg->data, y.seg->data, (size_t)x.seg->width * x.seg->height) == 0;
+    n += !same;
+  }
+  return n;
+}
+
+// BGR to BGRx with random x bytes, which the library must ignore
+static cv::Mat to_bgrx(const cv::Mat &bgr) {
+  cv::Mat bgrx, x(bgr.size(), CV_8U);
+  cv::cvtColor(bgr, bgrx, cv::COLOR_BGR2BGRA);
+  cv::randu(x, 0, 256);
+  cv::insertChannel(x, bgrx, 3);
+  return bgrx;
+}
+
 // per-instance maps vs the reference: largest difference in 8-bit levels
 static int seg_diff(const yolo::BoxArray &boxes, const RefModel &ref) {
   int worst = 0;
@@ -412,13 +440,15 @@ int main(int argc, char **argv) {
   cv::Size size;
   cv::Mat map1, map2, map_converted, map_float;
   float *map_converted_device = nullptr, *map_float_device = nullptr;
-  uint8_t *pinned = nullptr;
+  uint8_t *pinned = nullptr, *pinned_bgrx = nullptr;
   size_t pinned_bytes = 0;
 
   TensorDiff converted_vs_remap, float_vs_remapf, float_vs_remap;
   long undist_png_mismatch = 0, undist_png_frames = 0;
   long ref_cells = 0, ref_mismatch_small = 0, ref_mismatch_full = 0;
   long e2e_cells = 0, e2e_mismatch = 0, pinned_mismatch = 0, e2e_unmatched = 0;
+  TensorDiff bgrx_tensor;
+  long bgrx_cells = 0, bgrx_cell_mismatch = 0, bgrx_box_mismatch = 0;
   double worst_box = 0, worst_e2e_box = 0;
   int worst_seg = 0, ref_unmatched = 0;
   vector<double> iou_new, iou_old, gt_new, gt_old, gt_new_snap, gt_old_snap;
@@ -457,8 +487,8 @@ int main(int argc, char **argv) {
 
     // tensor: undistortion fused into the letterbox vs cv::remap then letterbox
     auto t_remap = letterbox(undist, nullptr, 0, 0, net_w, net_h);
-    converted_vs_remap.add(
-        letterbox(raw, map_converted_device, size.width, size.height, net_w, net_h), t_remap);
+    auto t_converted = letterbox(raw, map_converted_device, size.width, size.height, net_w, net_h);
+    converted_vs_remap.add(t_converted, t_remap);
     auto t_float = letterbox(raw, map_float_device, size.width, size.height, net_w, net_h);
     float_vs_remapf.add(t_float, letterbox(undist_float, nullptr, 0, 0, net_w, net_h));
     float_vs_remap.add(t_float, t_remap);
@@ -504,18 +534,28 @@ int main(int argc, char **argv) {
 
     // e2e: forward(U) vs forward(raw) undistorted by the library, pageable and page-locked
     yolo::Detections via_map, via_pinned;
+    cv::Mat raw_bgrx = to_bgrx(raw);
     if (raw.total() * 3 > pinned_bytes) {
       CHECK_CUDA(cudaFreeHost(pinned));
+      CHECK_CUDA(cudaFreeHost(pinned_bgrx));
       pinned_bytes = raw.total() * 3;
       CHECK_CUDA(cudaMallocHost(&pinned, pinned_bytes));
+      CHECK_CUDA(cudaMallocHost(&pinned_bgrx, raw.total() * 4));
     }
     memcpy(pinned, raw.data, raw.total() * 3);
-    yolo::Detections plain;
+    memcpy(pinned_bgrx, raw_bgrx.data, raw.total() * 4);
+    yolo::Detections plain, bgrx_plain, bgrx_map, bgrx_pinned;
+    vector<yolo::Detections> bgrx_batch;
+    cv::Mat image_bgrx = to_bgrx(image);
     if (!model->set_class_mask_size(kGridW, kGridH) ||
         !model->forward(yolo::Image(undist.data, undist.cols, undist.rows), plain) ||
+        !model->forward(yolo::Image(image_bgrx.data, image.cols, image.rows, 4), bgrx_plain) ||
         !model->set_source_map(size.width, size.height, map_converted.ptr<float>()) ||
         !model->forward(yolo::Image(raw.data, raw.cols, raw.rows), via_map) ||
         !model->forward(yolo::Image(pinned, raw.cols, raw.rows), via_pinned) ||
+        !model->forward(yolo::Image(raw_bgrx.data, raw.cols, raw.rows, 4), bgrx_map) ||
+        !model->forward(yolo::Image(pinned_bgrx, raw.cols, raw.rows, 4), bgrx_pinned) ||
+        !model->forwards({yolo::Image(raw_bgrx.data, raw.cols, raw.rows, 4)}, bgrx_batch) ||
         !model->set_source_map(0, 0, nullptr)) {
       printf("e2e forward failed on %s\n", path.c_str());
       return 1;
@@ -528,6 +568,20 @@ int main(int argc, char **argv) {
     e2e_unmatched += unmatched;
     worst_e2e_box = std::max(worst_e2e_box, box_diff(via_pinned.boxes, via_map.boxes, &unmatched));
     e2e_unmatched += unmatched;
+
+    // bgrx: everything above again from BGRx, which must not change a single bit
+    bgrx_tensor.add(
+        letterbox(raw_bgrx, map_converted_device, size.width, size.height, net_w, net_h),
+        t_converted);
+    bgrx_tensor.add(letterbox(raw_bgrx, nullptr, 0, 0, net_w, net_h),
+                    letterbox(raw, nullptr, 0, 0, net_w, net_h));
+    for (auto [bgrx, bgr] :
+         {std::pair{&bgrx_plain, &small}, std::pair{&bgrx_map, &via_map},
+          std::pair{&bgrx_pinned, &via_map}, std::pair{&bgrx_batch[0], &via_map}}) {
+      bgrx_cells += bgr->class_mask.data.size();
+      bgrx_cell_mismatch += cv::countNonZero(to_mat(bgrx->class_mask) != to_mat(bgr->class_mask));
+      bgrx_box_mismatch += box_mismatches(bgrx->boxes, bgr->boxes);
+    }
 
     printf("%s: %zu boxes, water IoU vs ref new %.5f old %.5f%s\n", path.filename().c_str(),
            small.boxes.size(), iou_new.back(), iou_old.back(),
@@ -563,6 +617,11 @@ int main(int argc, char **argv) {
       "[e2e] forward(U) vs forward(raw)+map: %ld / %ld cells differ, max box diff %.5f px, %ld "
       "unmatched; pinned vs pageable: %ld cells differ\n",
       e2e_mismatch, e2e_cells, worst_e2e_box, e2e_unmatched, pinned_mismatch);
+  printf(
+      "[bgrx] vs BGR: tensors %ld / %ld differ; forward plain, via map pageable / pinned, "
+      "forwards: %ld / %ld cells and %ld boxes differ\n",
+      bgrx_tensor.mismatches, bgrx_tensor.elements, bgrx_cell_mismatch, bgrx_cells,
+      bgrx_box_mismatch);
   if (!gt_new.empty())
     printf(
         "[gt] water IoU vs labels, median: new %.5f old %.5f; border-snapped: new %.5f old "

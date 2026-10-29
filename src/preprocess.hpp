@@ -59,14 +59,16 @@ struct SourceMap {
 };
 
 // Letterboxes the image into dst (planar float, dst_width x dst_height) with bilinear sampling,
-// const_value outside the image and then norm. The image is src (BGR, device-accessible) or, with
-// a source map, cv::remap(src, map, INTER_LINEAR, BORDER_REPLICATE) evaluated on the fly with
-// OpenCV's fixed-point arithmetic, so both give the same tensor bit for bit.
-void warp_affine_bilinear_and_normalize_plane(const uint8_t *src, int src_line_size, int src_width,
-                                              int src_height, const SourceMap &source_map,
-                                              float *dst, int dst_width, int dst_height,
-                                              const Matrix23 &d2i, uint8_t const_value,
-                                              const Norm &norm, cudaStream_t stream);
+// const_value outside the image and then norm. The image is src (device-accessible; BGR in the
+// first 3 of every src_pixel_size bytes: 3 for BGR, 4 for BGRx) or, with a source map,
+// cv::remap(src, map, INTER_LINEAR, BORDER_REPLICATE) evaluated on the fly with OpenCV's
+// fixed-point arithmetic, so both give the same tensor bit for bit.
+void warp_affine_bilinear_and_normalize_plane(const uint8_t *src, int src_line_size,
+                                              int src_pixel_size, int src_width, int src_height,
+                                              const SourceMap &source_map, float *dst,
+                                              int dst_width, int dst_height, const Matrix23 &d2i,
+                                              uint8_t const_value, const Norm &norm,
+                                              cudaStream_t stream);
 
 }  // namespace yolo
 

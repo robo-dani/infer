@@ -72,6 +72,9 @@ for (const yolo::Box &box : det.boxes) {
   map is set. Boxes from the end-to-end head are not clipped to the image.
 - With a source map, inference sees exactly `cv::remap(frame, map, INTER_LINEAR,
   BORDER_REPLICATE)`, bit for bit.
+- Frames are BGR (`yolo::Image` channels 3, the default) or BGRx (channels 4, e.g. straight from
+  a GStreamer `video/x-raw,format=BGRx` appsink; the 4th byte is ignored), rows packed. Both give
+  the same results bit for bit.
 - Frames in page-locked or device memory are read in place; anything else is copied to the
   device first.
 - A model is not thread-safe. Without a stream argument it runs on a stream it owns, and
@@ -94,7 +97,8 @@ Both tools read the camera calibration (`gmsl_camera_matrix`, `gmsl_dist_coeffs`
 
 ```bash
 # Correctness on real frames: fused undistort+letterbox vs cv::remap, boxes and masks vs a
-# double-precision CPU reference, forward(undistorted) vs forward(raw) with a source map.
+# double-precision CPU reference, forward(undistorted) vs forward(raw) with a source map, BGRx vs
+# BGR input.
 # --labels compares the water mask against YOLO polygon labels instead.
 build/tests/check_v26seg <engine> <calibration.yaml> <raw frame dir> \
     [--undist <png dir>] [--labels <label dir>] [--max <frames>]

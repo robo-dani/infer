@@ -49,15 +49,18 @@ struct Box {
         class_label(class_label) {}
 };
 
-// BGR, 8 bits per channel, rows packed (stride width * 3). When bgrptr points into page-locked
-// (cudaMallocHost, cudaHostRegister) or device memory the GPU reads the frame in place; otherwise
-// it is copied to the device first.
+// BGR (channels 3) or BGRx (channels 4, the 4th byte is ignored), 8 bits per channel, rows packed
+// (stride width * channels); both give the same results bit for bit. When bgrptr points into
+// page-locked (cudaMallocHost, cudaHostRegister) or device memory the GPU reads the frame in place;
+// otherwise it is copied to the device first.
 struct Image {
   const void *bgrptr = nullptr;
   int width = 0, height = 0;
+  int channels = 3;
 
   Image() = default;
-  Image(const void *bgrptr, int width, int height) : bgrptr(bgrptr), width(width), height(height) {}
+  Image(const void *bgrptr, int width, int height, int channels = 3)
+      : bgrptr(bgrptr), width(width), height(height), channels(channels) {}
 };
 
 typedef std::vector<Box> BoxArray;

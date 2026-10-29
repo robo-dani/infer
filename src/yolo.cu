@@ -203,7 +203,7 @@ static void decode_kernel_invoker(float *predict, int num_bboxes, int num_classe
         predict, num_bboxes, output_cdim, confidence_threshold, invert_affine_matrix, parray,
         MAX_IMAGE_BOXES));
     return;  // end-to-end head: model already de-duplicated, skip NMS
-  } else if (type == Type::V8 || type == Type::V8Seg) {
+  } else if (type == Type::V8) {
     checkKernel(decode_kernel_v8<<<grid, block, 0, stream>>>(
         predict, num_bboxes, num_classes, output_cdim, confidence_threshold, invert_affine_matrix,
         parray, MAX_IMAGE_BOXES));
@@ -230,8 +230,6 @@ const char *type_name(Type type) {
       return "YoloX";
     case Type::V8:
       return "YoloV8";
-    case Type::V8Seg:
-      return "YoloV8Seg";
     case Type::V26Seg:
       return "Yolo26Seg";
     default:
@@ -358,7 +356,7 @@ class InferImpl : public Infer {
     this->nms_threshold_ = nms_threshold;
 
     // by name: TensorRT does not promise any order of the IO tensors
-    has_segment_ = type == Type::V8Seg || type == Type::V26Seg;
+    has_segment_ = type == Type::V26Seg;
     vector<string> tensors = {"images", "output0"};
     if (has_segment_) tensors.push_back("output1");
     for (auto &name : tensors) {
@@ -387,10 +385,6 @@ class InferImpl : public Infer {
     } else if (type == Type::V8) {
       normalize_ = Norm::alpha_beta(1 / 255.0f, 0.0f, ChannelType::SwapRB);
       num_classes_ = bbox_head_dims_[2] - 4;
-    } else if (type == Type::V8Seg) {
-      normalize_ = Norm::alpha_beta(1 / 255.0f, 0.0f, ChannelType::SwapRB);
-      num_classes_ = bbox_head_dims_[2] - 4 - segment_head_dims_[1];
-      mask_coef_offset_ = 4 + num_classes_;
     } else if (type == Type::V26Seg) {
       normalize_ = Norm::alpha_beta(1 / 255.0f, 0.0f, ChannelType::SwapRB);
       // end-to-end rows: [x1, y1, x2, y2, conf, cls, mask coefficients...];
@@ -638,46 +632,6 @@ shared_ptr<Infer> load(const string &engine_file, Type type, float confidence_th
                        float nms_threshold) {
   return std::shared_ptr<InferImpl>(
       (InferImpl *)loadraw(engine_file, type, confidence_threshold, nms_threshold));
-}
-
-std::tuple<uint8_t, uint8_t, uint8_t> hsv2bgr(float h, float s, float v) {
-  const int h_i = static_cast<int>(h * 6);
-  const float f = h * 6 - h_i;
-  const float p = v * (1 - s);
-  const float q = v * (1 - f * s);
-  const float t = v * (1 - (1 - f) * s);
-  float r, g, b;
-  switch (h_i) {
-    case 0:
-      r = v, g = t, b = p;
-      break;
-    case 1:
-      r = q, g = v, b = p;
-      break;
-    case 2:
-      r = p, g = v, b = t;
-      break;
-    case 3:
-      r = p, g = q, b = v;
-      break;
-    case 4:
-      r = t, g = p, b = v;
-      break;
-    case 5:
-      r = v, g = p, b = q;
-      break;
-    default:
-      r = 1, g = 1, b = 1;
-      break;
-  }
-  return make_tuple(static_cast<uint8_t>(b * 255), static_cast<uint8_t>(g * 255),
-                    static_cast<uint8_t>(r * 255));
-}
-
-std::tuple<uint8_t, uint8_t, uint8_t> random_color(int id) {
-  float h_plane = ((((unsigned int)id << 2) ^ 0x937151) % 100) / 100.0f;
-  float s_plane = ((((unsigned int)id << 3) ^ 0x315793) % 100) / 100.0f;
-  return hsv2bgr(h_plane, s_plane, 1);
 }
 
 };  // namespace yolo

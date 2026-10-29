@@ -15,7 +15,6 @@ enum class Type : int {
   V3 = 2,
   V7 = 3,
   V8 = 5,
-  V8Seg = 6,  // yolov8 instance segmentation
   V26Seg = 7  // yolo26 end-to-end instance segmentation (NMS-free head)
 };
 
@@ -109,8 +108,6 @@ std::shared_ptr<Infer> load(const std::string &engine_file, Type type,
                             float confidence_threshold = 0.25f, float nms_threshold = 0.5f);
 
 const char *type_name(Type type);
-std::tuple<uint8_t, uint8_t, uint8_t> hsv2bgr(float h, float s, float v);
-std::tuple<uint8_t, uint8_t, uint8_t> random_color(int id);
 };  // namespace yolo
 
 #endif  // __YOLO_HPP__

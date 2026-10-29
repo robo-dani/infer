@@ -3,34 +3,19 @@
 #include <cuda_runtime.h>
 #include <stdarg.h>
 
+#include <algorithm>
 #include <fstream>
 #include <numeric>
 #include <sstream>
 #include <unordered_map>
 
+#include "check.hpp"
 #include "infer.hpp"
 
 namespace trt {
 
 using namespace std;
 using namespace nvinfer1;
-
-#define checkRuntime(call)                                                                 \
-  do {                                                                                     \
-    auto ___call__ret_code__ = (call);                                                     \
-    if (___call__ret_code__ != cudaSuccess) {                                              \
-      INFO("CUDA Runtime error💥 %s # %s, code = %s [ %d ]", #call,                         \
-           cudaGetErrorString(___call__ret_code__), cudaGetErrorName(___call__ret_code__), \
-           ___call__ret_code__);                                                           \
-      abort();                                                                             \
-    }                                                                                      \
-  } while (0)
-
-#define checkKernel(...)                 \
-  do {                                   \
-    { (__VA_ARGS__); }                   \
-    checkRuntime(cudaPeekAtLastError()); \
-  } while (0)
 
 #define Assert(op)                 \
   do {                             \
@@ -207,16 +192,9 @@ class __native_nvinfer_logger : public ILogger {
       abort();
     } else if (severity == Severity::kERROR) {
       INFO("NVInfer: %s", msg);
+    } else if (severity == Severity::kWARNING) {
+      INFO("NVInfer WARNING: %s", msg);
     }
-    // else  if (severity == Severity::kWARNING) {
-    //     INFO("NVInfer: %s", msg);
-    // }
-    // else  if (severity == Severity::kINFO) {
-    //     INFO("NVInfer: %s", msg);
-    // }
-    // else {
-    //     INFO("%s", msg);
-    // }
   }
 };
 static __native_nvinfer_logger gLogger;
@@ -282,8 +260,22 @@ class InferImpl : public Infer {
  public:
   shared_ptr<__native_engine_context> context_;
   unordered_map<string, int> binding_name_to_index_;
+  unordered_map<string, void *> tensor_address_;
 
-  virtual ~InferImpl() = default;
+  // forward() replays enqueueV3 as a CUDA graph, which cuts the per-frame CPU launch cost from
+  // milliseconds to microseconds. The graph bakes in tensor addresses and shapes, so any change
+  // to them drops it and the next calls re-capture.
+  cudaGraphExec_t graph_exec_ = nullptr;
+  bool graph_warmed_up_ = false;
+  bool graph_unsupported_ = false;
+
+  virtual ~InferImpl() { invalidate_graph(); }
+
+  void invalidate_graph() {
+    if (graph_exec_) checkRuntime(cudaGraphExecDestroy(graph_exec_));
+    graph_exec_ = nullptr;
+    graph_warmed_up_ = false;
+  }
 
   bool construct(const void *data, size_t size) {
     context_ = make_shared<__native_engine_context>();
@@ -322,13 +314,47 @@ class InferImpl : public Infer {
     return iter->second;
   }
 
-  virtual bool setTensorAddress(char const* name, void* data) {
-    return this->context_->context_->setTensorAddress(name, data);
+  virtual bool setTensorAddress(char const *name, void *data) override {
+    auto iter = tensor_address_.find(name);
+    if (iter != tensor_address_.end() && iter->second == data) return true;
+    if (!this->context_->context_->setTensorAddress(name, data)) return false;
+    tensor_address_[name] = data;
+    invalidate_graph();
+    return true;
   }
 
   virtual bool forward(void *stream) override {
-    
-    return this->context_->context_->enqueueV3((cudaStream_t)stream);
+    auto context = this->context_->context_;
+    cudaStream_t s = (cudaStream_t)stream;
+    // the legacy default stream cannot be captured
+    if (s == nullptr || graph_unsupported_) return context->enqueueV3(s);
+    if (graph_exec_) return cudaGraphLaunch(graph_exec_, s) == cudaSuccess;
+    if (!graph_warmed_up_) {
+      // TensorRT finishes deferred setup in the first enqueue after a change; keep it out of the
+      // capture
+      graph_warmed_up_ = true;
+      return context->enqueueV3(s);
+    }
+
+    cudaGraph_t graph = nullptr;
+    cudaError_t err = cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal);
+    bool enqueued = false;
+    if (err == cudaSuccess) {
+      enqueued = context->enqueueV3(s);
+      err = cudaStreamEndCapture(s, &graph);
+    }
+    if (enqueued && err == cudaSuccess) err = cudaGraphInstantiate(&graph_exec_, graph, 0);
+    if (graph) checkRuntime(cudaGraphDestroy(graph));
+    if (!enqueued || err != cudaSuccess) {
+      // e.g. an engine with layers that synchronize with the host; plain enqueue still works
+      INFO("NVInfer WARNING: CUDA graph capture failed (%s), using plain enqueueV3",
+           cudaGetErrorString(err));
+      cudaGetLastError();
+      graph_exec_ = nullptr;
+      graph_unsupported_ = true;
+      return context->enqueueV3(s);
+    }
+    return cudaGraphLaunch(graph_exec_, s) == cudaSuccess;
   }
 
   virtual std::vector<int> run_dims(const std::string &name) override {
@@ -363,11 +389,17 @@ class InferImpl : public Infer {
   }
 
   virtual bool set_run_dims(int ibinding, const std::vector<int> &dims) override {
+    if (dims.size() > (size_t)Dims::MAX_DIMS) return false;
     Dims d;
-    memcpy(d.d, dims.data(), sizeof(int) * dims.size());
     d.nbDims = dims.size();
+    for (int i = 0; i < d.nbDims; ++i) d.d[i] = dims[i];
+
     auto name = this->context_->engine_->getIOTensorName(ibinding);
-    return this->context_->context_->setInputShape(name, d);
+    Dims current = this->context_->context_->getTensorShape(name);
+    if (current.nbDims == d.nbDims && std::equal(d.d, d.d + d.nbDims, current.d)) return true;
+    if (!this->context_->context_->setInputShape(name, d)) return false;
+    invalidate_graph();
+    return true;
   }
 
   virtual int numel(const std::string &name) override { return numel(index(name)); }
@@ -401,32 +433,26 @@ class InferImpl : public Infer {
   virtual void print() override {
     INFO("Infer %p [%s]", this, has_dynamic_dim() ? "DynamicShape" : "StaticShape");
 
-    int num_input = 0;
-    int num_output = 0;
+    // TensorRT does not order IO tensors by mode, so group them here
     auto engine = this->context_->engine_;
+    vector<const char *> inputs, outputs;
     for (int i = 0; i < engine->getNbIOTensors(); ++i) {
       auto name = engine->getIOTensorName(i);
-      auto mode = engine->getTensorIOMode(name);
-      if (mode == nvinfer1::TensorIOMode::kINPUT) {
-        num_input++;
-      } else if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
-        num_output++;
-      }
+      if (engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT)
+        inputs.push_back(name);
+      else
+        outputs.push_back(name);
     }
 
-    INFO("Inputs: %d", num_input);
-    for (int i = 0; i < num_input; ++i) {
-      auto name = engine->getIOTensorName(i);
-      auto dim = engine->getTensorShape(name);
-      INFO("\t%d.%s : shape {%s}", i, name, format_shape(dim).c_str());
-    }
+    INFO("Inputs: %d", (int)inputs.size());
+    for (int i = 0; i < (int)inputs.size(); ++i)
+      INFO("\t%d.%s : shape {%s}", i, inputs[i],
+           format_shape(engine->getTensorShape(inputs[i])).c_str());
 
-    INFO("Outputs: %d", num_output);
-    for (int i = 0; i < num_output; ++i) {
-      auto name = engine->getIOTensorName(i + num_input);
-      auto dim = engine->getTensorShape(name);
-      INFO("\t%d.%s : shape {%s}", i, name, format_shape(dim).c_str());
-    }
+    INFO("Outputs: %d", (int)outputs.size());
+    for (int i = 0; i < (int)outputs.size(); ++i)
+      INFO("\t%d.%s : shape {%s}", i, outputs[i],
+           format_shape(engine->getTensorShape(outputs[i])).c_str());
   }
 };
 

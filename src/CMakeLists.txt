@@ -1,5 +1,7 @@
 add_library(infer SHARED
     infer.cu
+    preprocess.cu
+    segment.cu
     yolo.cu
 )
 

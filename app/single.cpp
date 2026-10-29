@@ -54,7 +54,12 @@ void single_inference(const char *engine_path, const char *image_path) {
     auto yolo = yolo::load(engine_path, yolo::Type::V26Seg, 0.4f);
     if (yolo == nullptr) return;
 
-    auto objs = yolo->forward(cvimg(image));
+    yolo::Detections detections;
+    if (!yolo->forward(cvimg(image), detections)) {
+        printf("inference failed\n");
+        return;
+    }
+    auto &objs = detections.boxes;
 
     // water accumulates into one frame-sized mask (so border snapping works
     // in frame space); other classes are painted per instance afterwards

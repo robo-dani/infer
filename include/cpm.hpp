@@ -110,7 +110,8 @@ class Instance {
       std::transform(fetch_items.begin(), fetch_items.end(), inputs.begin(),
                      [](Item &item) { return item.input; });
 
-      auto ret = model->forwards(inputs, stream_);
+      std::vector<Result> ret;
+      if (!model->forwards(inputs, ret, stream_)) ret.clear();
       for (int i = 0; i < (int)fetch_items.size(); ++i) {
         if (i < (int)ret.size()) {
           fetch_items[i].pro->set_value(ret[i]);

@@ -36,22 +36,25 @@ model->forward({input_device, output_device}, stream);
 ### step2: Use yolo inference
 ```c++
 cv::Mat image = cv::imread("image.jpg");
-auto model = yolo::load("yolov5s.engine");
-auto objs = model->forward(yolo::Image(image.data, image.cols, image.rows));
-// use objs to draw to image. 
+auto model = yolo::load("yolov5s.engine", yolo::Type::V5);
+yolo::Detections detections;
+if (!model->forward(yolo::Image(image.data, image.cols, image.rows), detections)) {
+    // inference failed (an empty detections.boxes after true means nothing was found)
+}
+// use detections.boxes to draw to image.
 ```
 
 
 # Use of CPM (wrapping the inference as producer-consumer)
 ```c++
-cpm::Instance<yolo::BoxArray, yolo::Image, yolo::Infer> cpmi;
+cpm::Instance<yolo::Detections, yolo::Image, yolo::Infer> cpmi;
 cpmi.start([]{
     return yolo::load("yolov5s.engine", yolo::Type::V5);
 }, batch);
 
 auto result_futures = cpmi.commits(images);
 for(auto& fut : result_futures){
-    auto objs = fut.get();
+    auto objs = fut.get().boxes;
     ... process ...
 }
 ```
